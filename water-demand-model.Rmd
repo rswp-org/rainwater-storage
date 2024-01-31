@@ -1,0 +1,249 @@
+---
+title: "water-demand-model"
+output:
+  html_document:
+  pdf_document: default
+date: "`r Sys.Date()`"
+---
+## Summary
+This model calculates the ideal capacity of a water system, based on average historic rainfall data in twelve-month water cycles ("water years"). The example uses data for Tororo District, Uganda as an example for the method. At the end, application of the approach to other datasets and other analysis of the data is considered.  
+```{r echo=FALSE}
+library(tidyverse)
+```
+## Data
+The data is taken from World Food Prorgamme (WFP) satellite data, publicly available through [Humanitarian Data Exchange](https://data.humdata.org/dataset/uga-rainfall-subnational).
+
+Variables provided in the source data are as follows:
+
+| Source  | Description                                            | Unit |
+|---------|--------------------------------------------------------|------|
+| rfh     | 10 day rainfall                                        | mm   |
+| r1h     | Rainfall 1-month rolling aggregation                   | mm   |
+| r3h     | Rainfall 3-month rolling aggregation                   | mm   |
+| rfh_avg | Rainfall long term average                             | mm   |
+| r1h_avg | Rainfall 1-month rolling aggregation long term average | mm   |
+| r3h_avg | Rainfall 3-month rolling aggregation long term average | mm   |
+| rfq     | Rainfall anomaly                                       | \%   |
+| r1q     | Rainfall 1-month anomaly                               | \%   |
+| r3q     | Rainfall 3-month anomaly                               | \%   |
+
+## Preparation
+The data can be loaded from either the online source or the downloaded file. The code below reads the file and glimpses the data to check its contents. 
+```{r echo=TRUE}
+# Use the url to read the file available online, or: 
+  # Download the rainfall .csv from link above,
+  # Delete "url," from the call to read_csv(...) below,
+  # Uncomment the call to file.choose(),
+  # Select the .csv containing rainfall data from downloads on your machine when prompted.
+
+url <- 'https://data.humdata.org/dataset/5ce9dfd7-b391-48cd-ad22-a6d0769fafe7/resource/96d0169f-0b56-428b-b59e-27e82c3f4eff/download/uga-rainfall-adm2-full.csv'
+
+data <- #file.choose() |>
+  read_csv(url, col_types = cols("D", "i", "c", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "c")) |>
+  # Remove the top row with no useful information. 
+  slice(-1)
+
+glimpse(data)
+```
+The overview of the data shows a few problems to be addressed:
+
+* The data is not tidy:
+  - There are NA values in the aggregate measures of rainfall,
+  - Measurements over different time periods are provided in one dataset. 
+* The location data (P-Code) is not human-readable.
+
+Named P-Codes are available on HDX, so we can read these in and add them to the data.
+``` {r echo=TRUE}
+# Set the URL of the file containing named P-Codes. 
+url_pcode <- 'https://data.humdata.org/dataset/cb963915-d7d1-4ffa-90dc-31277e24406f/resource/f65bc260-4d8b-416f-ac07-f2433b4d5142/download/global_pcodes_adm_1_2.csv'
+
+# Select the relevant information from the P-Codes file.
+pcodes <- read_csv(url_pcode) |> 
+  slice(-1) |>
+  select(Location, `P-Code`, Name)
+
+# Rename P-Codes information using lower case.
+names(pcodes) <- tolower(names(pcodes))
+
+#Redefine the data to include the named P-Code
+data <- left_join(data, pcodes, join_by(ADM2_PCODE == `p-code`))
+```
+## Tidying
+NA values in the data arise because each row or observation includes measurements over 1 month and 3 month timescales, whereas the measurement frequency is 10 days. Presenting data for different timeframes in different datasets eliminates NA values. 
+
+The new variable "window" identifies measurements made at 10-day, 1-month and 3-month aggregation intervals. The new variable "type" identifies rainfall, average and anomaly measurements. 
+```{r echo=TRUE}
+rainfall <- data |>
+  
+  # Create new variables window and type for:
+    # 10-day (rf), 1-month (r1) and 3-month (r3) measurements (window), and 
+    # rainfall (h), long-term average (avg) and anomaly (q) measurements (type).
+  pivot_longer(5:13, 
+               names_to = "type", 
+               values_to = "value") |>
+  mutate(
+    # Truncate the values in "type" to leave rf, r1 and r3 for 10-day, 1-month and 3-month
+    # measurements.
+    window = str_trunc(type, 2, ellipsis = ""),
+    # Remove characters to leave h, avg, and  q for rainfall, average and anomaly measurements. 
+    type = str_remove(type, "r.h_|rf|r1|r3"),
+         .before = type) |>
+  pivot_wider(names_from = "type") |>
+  
+  # Nest dataframes for cleanliness. 
+  nest_by(name, n_pixels, window)
+```
+After data is nested by location (name), resolution (n_pixels) and measurement timeframe (window), the nested data can be cleansed for relevant measurements. No filtering is needed on the data for the 10-day (rf) timeframe because this timeframe exactly matches the frequency of measurements.
+```{r echo=TRUE}
+# Mapping functions to tidy nested data:
+rainfall$data <-  rainfall$data |>
+  
+  # Filter monthly datasets for monthly rainfall measurements,
+  map_at(
+    grep("r1", rainfall$window), 
+    filter, day(date) == 21) |> 
+  
+  # Filter quarterly datasets for quarterly rainfall measurements,
+  map_at(
+    grep("r3", rainfall$window), 
+    filter, (day(date) * month(date)) %in% c(63, 126, 189, 252) == TRUE) |>
+  
+  # Ungroup for cleanliness.
+  map(ungroup)
+```
+The wettest month of the year can be identified from the data. This is used as the starting month of the water-year. 
+``` {r echo=TRUE}
+# Tabulate monthly rainfall.
+monthly <- rainfall |> group_by(name) |> filter(n_pixels == max(n_pixels) & window == "r1") |> ungroup() |> unnest(cols = c(data))
+
+# Record the start month of the water year.
+water_year_start <- month(monthly$date[which(monthly$avg == max(unique(monthly$avg)))][1])
+
+# Plot the average and actual rainfall in all districts by month.
+# Check the output saved to water_year_start for sense against the plot.
+monthly |> group_by(month = factor(month(date))) |> summarise(rainfall = sum(h), average = sum(avg)) |> pivot_longer(c("rainfall", "average"), names_to = "measure", values_to = "h") |> ggplot(aes(x = month, y = h, fill = measure)) + geom_col(position = "dodge")
+```
+
+The first month of the water year is `r month.name[water_year_start]`. The chart above shows monthly rainfall (blue) and long-term average rainfall (red). 
+
+We add a water year variable to align the beginning of the annual rainfall measurements in the data with the start of the wet season. This allows the model to capture the greatest differences between water supply and demand. 
+``` {r echo=TRUE}
+# Add a water year variable to align the data with water_year_start. 
+rainfall$data <- 
+  rainfall$data |> 
+  map(mutate,
+    water_year = year(date) - !(month(date) %in% water_year_start:12),
+    .after = date) |>
+  
+  # Get cumulative rainfall for each water year in all datasets throughout each water year,
+  map(group_by, water_year) |>
+  map(mutate, 
+      cum_h = cumsum(h), 
+      .after = h) |> 
+  map(ungroup, water_year)
+```
+## Model
+To apply the model, we consider 1-month aggregated rainfall in Tororo District, Uganda at the maximum available pixel resolution.
+``` {r echo=TRUE}
+# Extract the data for Tororo
+tororo <- rainfall |> group_by(name) |> 
+  filter(
+    name == "Tororo" & 
+    n_pixels == max(n_pixels) & 
+    window == "r1") |>
+  ungroup(name) |> 
+  unnest(cols = c(data))
+```
+We then identify the base year for calculating ideal water storage capacity.  
+```{r echo=TRUE}
+# Tabulate the total cumulative rainfall in every water year.
+base_year <- tororo |>
+  group_by(water_year) |>
+  filter(cum_h == max(cum_h)) |>
+  ungroup(water_year)
+
+# Set the rainfall expectation (base_h) which is exceeded in 95% of water years (i.e. 5th percentile).
+base_h <- base_year[[11]] |> quantile(0.05)
+
+# Set the water year that is closest to and above the rainfall expectation as the base year.
+base_year <- base_year |>
+  filter(cum_h == min(
+    base_year$cum_h[grep(TRUE, base_year$cum_h - base_h > 0)])) |> 
+  select(water_year) |>
+  unlist()
+
+# Retreive rainfall data for the base year. 
+base_case <- tororo |>
+  filter(water_year == base_year)
+```
+The rainfall data used to determine required storage is from the year `r base_year`. In this year `r round(base_h, 1)`mm of rain was recorded. 
+
+## Demand 
+We assume a level of demand and an efficiency for the rainfall capturing surface.  
+```{r echo=TRUE}
+# Assume a volume of demand in cubic meters, here 15 liters per year for 100 people. 
+demand_vol <- 10 * 100 * 364.25/1000
+
+# Set efficiency for the capturing surface (proportion of rainfall captured).
+efficiency <- 0.5
+
+# Calculate the area of the capturing surface required to meet demand volume given rainfall in the base year.
+area <- demand_vol / (efficiency * base_h * 0.001)
+
+# Add the rainfall capture and linear demand to the base case.
+base_case <- base_case %>% 
+  mutate(month = fct_inorder(month.abb[month(date)]),
+         cum_h = cum_h,
+         capture = h * 0.001 * efficiency * area,
+         need = demand_vol/n(),
+         supply = cumsum(capture), 
+         demand = cumsum(need),
+         diff = supply - demand, 
+         .keep = "none",
+         .after = month)
+
+storage <- max(base_case$diff)
+
+base_case |> select(cum_h, month, supply, demand) |> pivot_longer(3:4, names_to = "measure") |> ggplot(aes(x = month)) + geom_col(aes(y = value, group = measure, fill = measure), position = "dodge") + geom_point(aes(y = cum_h))
+```
+
+Black dots mark the total cumulative rainfall for each month. The storage required is `r round(storage, 1)` cubic meters. This difference arises in the month of `r base_case$month[which(base_case$diff == max(base_case$diff))]`.
+
+## Further analysis
+Further work on this model could involve:
+
+* Refining demand projections to reflect water consumption in real settings. A linear model of demand is not realistic in a school. 
+* Testing the validity of the efficiency assumption.
+* Assessing the performance of the model storage tank using rainfall data for years other than the base year. 
+* Evaluating the sensitivity of the model to demand and efficiency inputs. 
+* Reviewing the model against the literature, [Rainwater Catchment Systems for Domestic Supply](https://practicalactionpublishing.com/book/1761/rainwater-catchment-systems-for-domestic-supply).
+* Developing more realistic ways of constraining the model. For example, catchment areas are limited by available space or surface area.
+* Finding some way to acknowledge or predict costs. 
+* Producing charts and graphs that are more appealing, intuitive or useful.
+* Applying the model to other locations, perhaps using data from the sources below.
+* Adapting the model to assess whether systems already in place are fit for purpose.
+
+``` {r echo=TRUE}
+# Rainfall data for other dry countries is available from the following locations.
+url_uganda <- 
+  'https://data.humdata.org/dataset/5ce9dfd7-b391-48cd-ad22-a6d0769fafe7/resource/96d0169f-0b56-428b-b59e-27e82c3f4eff/download/uga-rainfall-adm2-full.csv'
+url_namibia <- 
+  'https://data.humdata.org/dataset/d5211e9a-9b5b-45b5-a62c-bae4da4def46/resource/580104b3-2d95-4371-933d-9a4d1318e3c2/download/nam-rainfall-adm2-full.csv'
+url_peru <- 
+  'https://data.humdata.org/dataset/f5442ac6-4a5a-45a5-9763-ac60e5203bb1/resource/48fb6ece-8d03-4fde-b5e5-f5150ba207ce/download/per-rainfall-adm2-full.csv'
+url_sudan <- 
+  'https://data.humdata.org/dataset/139b7e9c-3c40-49e0-a44e-0eed6dad46d2/resource/eb6fbac0-1381-44a1-80e2-e49a70585f82/download/sdn-rainfall-adm2-full.csv'
+url_algeria <- 
+  'https://data.humdata.org/dataset/f18fb0de-5323-4c2c-a987-246ece96e8bb/resource/ecf1aa67-5c29-430c-93fc-0252ac1a2d1a/download/dza-rainfall-adm2-full.csv'
+url_ethiopia <- 
+  'https://data.humdata.org/dataset/423143be-315f-48d7-9e90-ae23738da564/resource/e8bb806b-c4a4-4892-aa0c-68bb7e490004/download/eth-rainfall-adm2-full.csv'
+url_morocco <- 
+  'https://data.humdata.org/dataset/1bd3a3a1-9c39-412b-97db-bfb80866d33f/resource/d386a362-4596-405d-8c32-ff6fa85c3632/download/mar-rainfall-adm2-full.csv'
+url_egypt <- 
+  'https://data.humdata.org/dataset/459b918b-1ca8-4f0a-b8b0-1e9e58829b53/resource/8e175af6-fb91-4ca0-9d25-713e262176a3/download/egy-rainfall-adm2-full.csv'
+url_iran <- 
+  'https://data.humdata.org/dataset/df1ba23f-d7f7-452a-bc1c-b283b8f9a958/resource/491ca0c4-a926-4690-8fe0-7b7d69cfa1c4/download/irn-rainfall-adm2-full.csv'
+url_chile <- 
+  'https://data.humdata.org/dataset/cb894926-763d-4912-8498-5d79a3510f60/resource/17fb3495-6340-4ce6-8c48-6e85fbb456c6/download/chl-rainfall-adm2-full.csv'
+url_afghanistan <- 
+  'https://data.humdata.org/dataset/3b5e8a5c-e4e0-4c58-9c58-d87e33520e08/resource/a8c98023-e078-4684-ade3-9fdfd66a1361/download/afg-rainfall-adm2-full.csv'
