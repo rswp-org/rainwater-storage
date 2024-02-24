@@ -9,6 +9,10 @@ date: "`r Sys.Date()`"
 This model simulates monthly water balance in a rainwater harvesting system. The example uses rainfall data for Tororo District, Uganda as an example for the method. At the end, application of the approach to other datasets and other analysis of the data is considered.
 ```{r echo=FALSE}
 library(tidyverse)
+# The rhdx package is an R client for the Humanitarian Data Exchange platform: https://github.com/dickoa/rhdx
+# rhdx is not on CRAN and must be installed using the remotes package:
+remotes::install_github("dickoa/rhdx")
+library(rhdx)
 ```
 ## Data
 The data is taken from World Food Prorgamme (WFP) satellite data, publicly available through [Humanitarian Data Exchange](https://data.humdata.org/dataset/uga-rainfall-subnational).
@@ -28,20 +32,22 @@ Variables provided in the source data are as follows:
 | r3q     | Rainfall 3-month anomaly                               | \%   |
 
 ## Preparation
-The data can be loaded from either the online source or the downloaded file. The code below reads the file and glimpses the data to check its contents. 
+The data can be loaded using rhdx. The code below reads the file and glimpses the data to check its contents. 
 ```{r echo=TRUE}
-# Use the url to read the file available online, or: 
+# Use rhdx to get Uganda rainfall data:
+data <- pull_dataset("uga-rainfall-subnational") |> get_resource(1) |> read_resource()
+# Or
   # Download the rainfall .csv from link above,
   # Delete "url," from the call to read_csv(...) below,
   # Uncomment the call to file.choose(),
   # Select the .csv containing rainfall data from downloads on your machine when prompted.
 
-url <- 'https://data.humdata.org/dataset/5ce9dfd7-b391-48cd-ad22-a6d0769fafe7/resource/96d0169f-0b56-428b-b59e-27e82c3f4eff/download/uga-rainfall-adm2-full.csv'
+# url <- 'https://data.humdata.org/dataset/5ce9dfd7-b391-48cd-ad22-a6d0769fafe7/resource/96d0169f-0b56-428b-b59e-27e82c3f4eff/download/uga-rainfall-adm2-full.csv'
 
-data <- #file.choose() |>
-  read_csv(url, col_types = cols("D", "i", "c", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "c")) |>
+# data <- #file.choose() |>
+  # read_csv(url, col_types = cols("D", "i", "c", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "c")) |>
   # Remove the top row with no useful information. 
-  slice(-1)
+  # slice(-1)
 
 glimpse(data)
 ```
@@ -54,18 +60,20 @@ The overview of the data shows a few problems to be addressed:
 
 Named P-Codes are available on HDX, so we can read these in and add them to the data.
 ``` {r echo=TRUE}
+# Use rhdx to get pcodes
+pull_dataset("global-pcodes") |> get_resource(2) |> read_resource() |> select(Location, `P-Code`, Name)
 # Set the URL of the file containing named P-Codes. 
-url_pcode <- 'https://data.humdata.org/dataset/cb963915-d7d1-4ffa-90dc-31277e24406f/resource/f65bc260-4d8b-416f-ac07-f2433b4d5142/download/global_pcodes_adm_1_2.csv'
+# url_pcode <- 'https://data.humdata.org/dataset/cb963915-d7d1-4ffa-90dc-31277e24406f/resource/f65bc260-4d8b-416f-ac07-f2433b4d5142/download/global_pcodes_adm_1_2.csv'
 
 # Select the relevant information from the P-Codes file.
-pcodes <- read_csv(url_pcode) |> 
-  slice(-1) |>
-  select(Location, `P-Code`, Name)
+# pcodes <- read_csv(url_pcode) |> 
+  # slice(-1) |>
+  # select(Location, `P-Code`, Name)
 
 # Rename P-Codes information using lower case.
 names(pcodes) <- tolower(names(pcodes))
 
-#Redefine the data to include the named P-Code
+# Redefine the data to include the named P-Code
 data <- left_join(data, pcodes, join_by(ADM2_PCODE == `p-code`))
 ```
 ## Tidying
