@@ -1,12 +1,12 @@
 ---
-title: "water-demand-model"
+title: "water-balance-simulation"
 output:
   html_document:
   pdf_document: default
 date: "`r Sys.Date()`"
 ---
 ## Summary
-This model calculates the ideal capacity of a water system, based on average historic rainfall data in twelve-month water cycles ("water years"). The example uses data for Tororo District, Uganda as an example for the method. At the end, application of the approach to other datasets and other analysis of the data is considered.  
+This model simulates monthly water balance in a rainwater harvesting system. The example uses rainfall data for Tororo District, Uganda as an example for the method. At the end, application of the approach to other datasets and other analysis of the data is considered.
 ```{r echo=FALSE}
 library(tidyverse)
 ```
@@ -155,22 +155,22 @@ tororo <- rainfall |> group_by(name) |>
   unnest(cols = c(data))
 ```
 
-Calculate monthly water balance.
+Calculate monthly water balance, overflow and deficit.
 ``` {r echo=TRUE}
 # Assume a volume of demand in cubic meters, here 10 liters per day for 1000 people (m3/year).
-demand_vol <- 10 * 1000 * 364.25/1000
+demand_vol <- 3 * 1000 * 364.25/1000
 
 # Set efficiency for the capturing surface (proportion of rainfall captured).
 efficiency <- 0.8
 
 # Set area of the capturing surface (m2).
-area <- 400
+area <- 1200
 
-# Set storage capacity (m3).
-storage <- 10
+# Set storage capacity (m3). Note, this should reflect the effective storage of the tank (e.g. taking into account taps and overflow pipes).
+storage <- 20
 
-# Set date of rainwater system first operation.
-first_operation_date <- as.Date('2017-01-01')
+# Set date of rainwater system first operation. This is only required if evaluating historic performance. To calculate probabilities for outcomes, the longest dataset available should be used.
+first_operation_date <- as.Date('1981-01-21')
 
 # Filter tororo dataframe from date of first operation.
 tororo_filtered <- tororo %>%
@@ -189,31 +189,94 @@ monthly_wb <- tororo_filtered %>%
          deficit = pmax(-unrestrained_balance, 0))
          #.keep = "none",
          #.after = month)
-  
-# Plot graph.
-ggplot(monthly_wb, aes(x = month, y = unrestrained_balance)) +
-  geom_line() +
-  stat_summary(fun = min, geom = "point", color = "red", size = 2) +
-  stat_summary(fun = max, geom = "point", color = "blue", size = 2) +
+
+```
+
+Calculate the probability of monthly water balance scenarios (deficit, balance and overflow).
+``` {r echo=TRUE}
+# Calculate probability of monthly balance, overflow and deficit.
+probability_of_outcomes <- monthly_wb %>%
+  group_by(month) %>%
+  summarise(
+    f_of_balance = sum(unrestrained_balance >= 0 & unrestrained_balance <= storage),
+    p_of_balance = f_of_balance / n(),
+    f_of_overflow = sum(unrestrained_balance > storage),
+    p_of_overflow = f_of_overflow / n(),
+    f_of_deficit = sum(unrestrained_balance < 0),
+    p_of_deficit = f_of_deficit / n()
+  )
+
+```
+
+Data visualisation.
+``` {r echo=TRUE}
+# monthly_wb range of values by month
+monthly_wb %>%
+    ggplot(aes(month, unrestrained_balance)) +
+    geom_point() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "green") +
+    geom_hline(yintercept = storage, linetype = "dashed", color = "red") +
+    geom_text(aes(label = round(unrestrained_balance, 2)), vjust = -0.5, hjust = 0.5, color = "black") +  # Add data labels
+    geom_smooth(method = "lm", se = FALSE) +  # Add a linear trendline
+    #scale_y_continuous(sec.axis = sec_axis(~.*2, name = "h")) +
+    labs(title = "Unrestrained Balance Over Months",
+         x = "Month",
+         y = "Unrestrained Balance",
+         color = "water_year") +
+    theme_bw()
+
+# monthly_wb range of value by month as box plot
+monthly_wb %>%
+  ggplot(aes(x = month, y = unrestrained_balance)) +
+  geom_boxplot(fill = "skyblue", color = "black") +
   geom_hline(yintercept = 0, linetype = "dashed", color = "green") +
   geom_hline(yintercept = storage, linetype = "dashed", color = "red") +
-  labs(title = "Unrestrained Balance Over Months",
+  #scale_y_continuous(sec.axis = sec_axis(~.*2, name = "h")) +
+  labs(title = "Distribution of Unrestrained Balance Over Months",
        x = "Month",
-       y = "Unrestrained Balance")
+       y = "Unrestrained Balance",
+       color = "water_year") +
+  theme_bw()
 
+# monthly_wb range of value by month, each year
+monthly_wb %>%  
+  ggplot(aes(month, unrestrained_balance)) +
+    geom_point() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "green") +
+    geom_hline(yintercept = storage, linetype = "dashed", color = "red") +
+    #scale_y_continuous(sec.axis = sec_axis(~.*2, name = "h")) +
+    facet_wrap(~water_year) +
+    scale_y_continuous(sec.axis = sec_axis(~.*2, name = "h")) +
+    labs(title = "Unrestrained Balance Over Months",
+         x = "Month",
+         y = "Unrestrained Balance") +
+    theme_bw()
 
-# thoughts... in practice, demand will not be constant over the period of analysis (school population will change) 
+# Probability of monthly water balance scenarios
+    
+# Reshape the data to long format
+probability_of_outcomes_long <- probability_of_outcomes %>%
+  pivot_longer(cols = starts_with("p_of_"), names_to = "Scenario", values_to = "Probability") %>%
+  mutate(Scenario = factor(Scenario, levels = c("p_of_deficit", "p_of_balance", "p_of_overflow")))
+
+# Create a stacked bar graph
+ggplot(probability_of_outcomes_long, aes(x = month, y = Probability, fill = Scenario)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  geom_text(aes(label = paste0(round(Probability * 100), "%")), 
+            position = position_stack(vjust = 0.5), 
+            size = 3, color = "white") +
+  labs(x = "Month", y = "Probability (%)", fill = "Scenario") +
+  ggtitle("Probabilities of Monthly Water Balance Scenarios") +
+  theme_minimal()
 
 ```
 ## Further analysis
 Further work on this model could involve:
 
 * Refining demand projections to reflect water consumption in real settings. A linear model of demand is not realistic in a school. 
-* Testing the validity of the efficiency assumption.
-* Assessing the performance of the model storage tank using rainfall data for years other than the base year. 
-* Evaluating the sensitivity of the model to demand and efficiency inputs. 
-* Reviewing the model against the literature, [Rainwater Catchment Systems for Domestic Supply](https://practicalactionpublishing.com/book/1761/rainwater-catchment-systems-for-domestic-supply).
-* Developing more realistic ways of constraining the model. For example, catchment areas are limited by available space or surface area.
+* Testing the validity of the capture surface efficiency assumption.
+* Evaluating the sensitivity of the model to demand and efficiency inputs.
 * Finding some way to acknowledge or predict costs. 
 * Producing charts and graphs that are more appealing, intuitive or useful.
 * Applying the model to other locations, perhaps using data from the sources below.
